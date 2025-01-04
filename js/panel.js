@@ -1,7 +1,5 @@
 let batchTimer;
 let batch = {};
-let requests = [];
-
 const batchCount = 10;
 const num_graph_sections = 13; // +1 (starts at 0)
 
@@ -30,61 +28,89 @@ function selectItemAvailability() {
 function checkBatch() {
     chrome.tabs.query({ url: ["https://www.facebook.com/marketplace/*"] }, function (tabs) {
         const path = tabs[0].url;
-        chrome.storage.local.get([path], async storage => {
-            if (requests.length === 0) return;
+        chrome.storage.local.get([path], storage => {
+            //selectItemAvailability();
             const availability = tabs[0].url.includes("availability=out%20of%20stock") ? "sold" : "available";
-            processNewItems(availability).then(items => {
-                let existing = storage[path] ? storage[path] : {};
-                let updatedData = { ...existing, ...items };
-
-                chrome.storage.local.set({ [path]: updatedData }).then(() => {
-                    document.querySelector(".batch-count").textContent = "refreshing";
-                    setTimeout(() => {
-                        document.querySelector(".batch-count").textContent = "";
-                    }, 2000);
-                    filterItems();
-                });
+            const keys = Object.keys(batch);
+            keys.forEach(key => {
+                batch[key].availability = availability;
             });
+
+            let existing = storage[path] ? storage[path] : {};
+            let updatedData = { ...existing, ...batch };
+            if (keys.length === 0) return;
+
+            batch = {};
+            chrome.storage.local.set({ [path]: updatedData }).then(() => {
+                document.querySelector(".batch-count").textContent = "dumped";
+
+                filterItems();
+            });
+
         });
     });
 }
 
-function processNewItems(availability) {
-    return new Promise((resolve, reject) => {
-        let b = {};
-        for (let i = 0; i < requests.length; i++) {
-            requests[i].getContent(body => {
-                try {
-                    let parsed = JSON.parse(body);
-                    let item = parsed?.data?.viewer?.marketplace_product_details_page?.target;
-                    if (!item) return;
+async function detectNewItem(request) {
+  request.getContent((body) => {
+    if (
+      request.request &&
+      request.request.url &&
+      request.request.url.includes("https://www.facebook.com/api/graphql/")
+    ) {
+      try {
+        let req = body.split('{"data":')[1].split(',"extensions":{')[0];
+        let data = JSON.parse(req);
+        if (data?.viewer?.marketplace_product_details_page?.target) {
+          let x = data.viewer.marketplace_product_details_page.target;
+          x.availability = "available";
+          x.hide = false;
 
-                    item.availability = availability;
-                    item.hide = false;
-                    if (item["can_buyer_make_checkout_offer"] !== undefined) {
-                        item.negotiable = item.can_buyer_make_checkout_offer ? true : isItemNegotiable(item.marketplace_listing_title + " " + item.redacted_description.text);
-                    }
+          // Safely extract redacted_description text
+          let redText = "";
+          if (x.redacted_description && x.redacted_description.text) {
+            redText = x.redacted_description.text;
+          }
 
-                    if (!b[item.id]) {
-                        b[item.id] = { ...item, "updated": true };
-                    } else {
-                        b[item.id] = { ...b[item.id], ...item };
-                    }
-                } catch {
-                    console.log("error parsing body");
-                } finally {
-                    if (i === requests.length - 1) resolve(b);
-                }
-            });
+          // Now use redText here:
+          x.negotiable = x.can_buyer_make_checkout_offer
+            ? true
+            : isItemNegotiable(x.marketplace_listing_title + " " + redText);
+
+          if (!batch[x.id]) {
+            batch[x.id] = { ...x, updated: true };
+          } else {
+            batch[x.id] = { ...batch[x.id], ...x };
+          }
+          document.querySelector(".batch-count").textContent =
+            Object.keys(batch).length + " waiting";
         }
-    });
+      } catch (e) {
+        let x = document.createElement("p");
+        x.textContent = e;
+        document.body.appendChild(x);
+      }
+    }
+  });
 }
+
 
 function createListing(item) {
     let div = document.createElement("div");
     div.classList.add("item-container");
     div.dataset.id = item.id;
 
+    // If there's at least one photo, use it; otherwise fallback
+    let mainPhoto = "";
+    if (item.listing_photos && item.listing_photos.length > 0) {
+        mainPhoto = item.listing_photos[0].image.uri;
+    } else {
+        mainPhoto = ""; // or some fallback URL or just empty
+    } 
+	let locationLabel = "";
+	if (item.location_text && item.location_text.text) {
+		locationLabel = item.location_text.text;
+}
     div.innerHTML = `<div class="item-info">
                         <div style="display: flex;justify-content:space-between">
                             <div>
@@ -101,28 +127,28 @@ function createListing(item) {
                         <div>
                             <div class="item-link" style="padding: 10px; margin: -10px;display: block; color: #fff;text-decoration:none">
                                 <p style="margin: 0;font-size:14px;font-weight:700">${item.marketplace_listing_title}</p>
-                                <p style="margin: 0;font-size:12px">${item.location_text.text} (${item.distance}mi)</p>
+                                <p style="margin: 0;font-size:12px">${locationLabel} (${item.distance}mi)</p>
                             </div>
                         </div>
                     </div>
-                    <img class="item-image image-active image-primary" data-imgnum="0" src="${item.listing_photos[0].image.uri}"></img>`;
+                    <img class="item-image image-active image-primary" data-imgnum="0" src="${mainPhoto}"></img>`;
 
     //document.querySelector(".items").appendChild(div);
 
     /* lazy load images */
 
-    let lazyLoad = function () {
-        let img = div.querySelector(".image-primary");
-        if (!img.classList.contains("loaded")) {
-            img.src = item.listing_photos[0].image.uri;
-        }
-        div.removeEventListener("click", lazyLoad);
-    }
+	let lazyLoad = function () {
+		let img = div.querySelector(".image-primary");
+		if (!img.classList.contains("loaded")) {
+			img.src = mainPhoto;
+		}
+		div.removeEventListener("click", lazyLoad);
+	};
 
     div.addEventListener("click", lazyLoad);
 
     /* creating picture album */
-    if (item.listing_photos.length > 1) {
+    if (item.listing_photos && item.listing_photos.length > 1) {
 
         for (let i = 1; i < item.listing_photos.length; i++) {
             let img = document.createElement("img");
@@ -242,6 +268,11 @@ function filterItems() {
                     if (totalAfterFilter >= storage["settings"]["max_items"]) return;
                     const item = data[key];
                     let allowAfterFilter = true;
+					if (!item.location || item.location.latitude == null || item.location.longitude == null) {
+					// Decide if you want to skip or fallback
+					// e.g. skip:
+					allowAfterFilter = false; // or "return" from the forEach
+					}
                     let xlat = parseFloat(item.location.latitude), xlong = parseFloat(item.location.longitude);
                     let pythx = Math.sqrt(Math.pow(options.lat - xlat, 2) + Math.pow(options.long - xlong, 2));
                     let prc = parseInt(item.listing_price.amount);
@@ -250,35 +281,53 @@ function filterItems() {
                     let timeago = now - item.creation_time;
 
                     if (options.explicitWords.checked === true) {
-                        let words = options.explicitWords.words.split(",");
-                        let description = (" " + item.marketplace_listing_title + " " + item.redacted_description.text + " ").toLowerCase();
-                        let found = false;
-                        words.forEach(word => {
-                            if (word === "" || found === true) return;
-                            if (description.includes(" " + word.toLowerCase().trim() + " ")) {
-                                found = true;
-                            }
-                        });
-                        allowAfterFilter = found;
-                    }
+						let words = options.explicitWords.words.split(",");
+						let redText = "";
+						if (item.redacted_description && item.redacted_description.text) {
+							redText = item.redacted_description.text;
+						}
+						// Now use redText here, not item.redacted_description.text
+						let description = (" " + item.marketplace_listing_title + " " + redText + " ").toLowerCase();
+						
+						let found = false;
+						words.forEach(word => {
+							if (word === "" || found === true) return;
+							if (description.includes(" " + word.toLowerCase().trim() + " ")) {
+								found = true;
+							}
+						});
+						allowAfterFilter = found;
+					}
 
                     if (options.explicitWordsHide.checked === true) {
-                        let words = options.explicitWordsHide.words.split(",");
-                        let description = (" " + item.marketplace_listing_title + " " + item.redacted_description.text + " ").toLowerCase();
-                        words.forEach(word => {
-                            if (word !== "") {
-                                if (description.includes(word.toLowerCase())) {
-                                    allowAfterFilter = false;
-                                }
-                            }
-                        });
-                    }
+						let words = options.explicitWordsHide.words.split(",");
+						let redText = "";
+						if (item.redacted_description && item.redacted_description.text) {
+							redText = item.redacted_description.text;
+						}
+						let description = (" " + item.marketplace_listing_title + " " + redText + " ").toLowerCase();
+
+						words.forEach(word => {
+							if (word !== "") {
+								if (description.includes(word.toLowerCase())) {
+									allowAfterFilter = false;
+								}
+							}
+						});
+					}
 
                     if (options.hideEmojis.checked === true) {
-                        let description = (" " + item.marketplace_listing_title + " " + item.redacted_description.text + " ");
-                        if ((description.match(/([\uD800-\uDBFF][\uDC00-\uDFFF])/g))) allowAfterFilter = false;
+						let redText = "";
+						if (item.redacted_description && item.redacted_description.text) {
+							redText = item.redacted_description.text;
+						}
+						// Use redText
+						let description = (" " + item.marketplace_listing_title + " " + redText + " ");
+						if (description.match(/([\uD800-\uDBFF][\uDC00-\uDFFF])/g)) {
+							allowAfterFilter = false;
+						}
+					}
 
-                    }
 
                     if (options.beforeYear.checked === true) {
                         let year = new Date(parseInt(options.beforeYear.year), 0);
@@ -335,7 +384,6 @@ function filterItems() {
 
                 filtered = filtered.sort(sortBy(options.sort, options.direction));
 
-                console.log(filtered);
 
                 for (const item of filtered) {
                     let section = (parseInt(item.listing_price.amount) === 0 || parseInt(item.listing_price.amount) === low) && incr === 0 ? 0 : parseInt((parseInt(item.listing_price.amount) - low) / incr);
@@ -420,7 +468,7 @@ function display() {
         const start = Math.min(Math.floor((scrollTop / ih)) * numCols);
         if (start === prev || scrollTop >= maxScroll) return;
 
-        document.querySelector(".items").style.top = y + "px";
+        document.querySelector(".items").style.top =  y + "px";
 
         for (var j = 0; j < numItems + numCols; j++) {
             if (j + start > currentItems.length - 1) return;
@@ -428,7 +476,7 @@ function display() {
             items[j].innerHTML = "";
             items[j].appendChild(item);
         }
-
+        
         prev = start;
 
     }
@@ -549,14 +597,7 @@ document.addEventListener("DOMContentLoaded", function () {
 
     //checkBatch()
     batchTimer = setInterval(checkBatch, 5000);
-
-    chrome.devtools.network.onRequestFinished.addListener((request) => {
-        if (request.request && request.request.url && request.request.url.includes('https://www.facebook.com/api/graphql/')) {
-            requests.push(request);
-        }
-    });
-
-    //chrome.devtools.network.onRequestFinished.addListener(detectNewItem);
+    chrome.devtools.network.onRequestFinished.addListener(detectNewItem);
 
     selectItemAvailability();
 
@@ -578,7 +619,7 @@ document.addEventListener("DOMContentLoaded", function () {
         if (request.type === "numListings") {
         } else if (request.type === "existingItem") {
             request.data.seen = true;
-           // detectNewItem(request);
+            detectNewItem(request);
         }
     });
 
@@ -594,31 +635,75 @@ document.addEventListener("DOMContentLoaded", function () {
         });
     });
 
-    // send start message to content script
-    document.querySelector("#start").addEventListener("click", function (e) {
-        //clearInterval(refreshInterval);
-        //refresh();
-        //refreshInterval = setInterval(refresh, 10000);
+    //send start message to content script
+    // document.querySelector("#start").addEventListener("click", function (e) {
+    //     //clearInterval(refreshInterval);
+    //     //refresh();
+    //     //refreshInterval = setInterval(refresh, 10000);
 
-        chrome.tabs.query({ active: true, currentWindow: true }, function (tabs) {
-            const save = document.querySelector("#save-under").value;
-            chrome.storage.local.get("saved", storage => {
-                for (let i = 0; i < storage["saved"].length; i++) {
-                    if (storage["saved"][i].name === save) {
-                        if (!storage["saved"][i].pathnames.includes(tabs[0].url)) {
-                            storage["saved"][i].pathnames.push(tabs[0].url);
-                            chrome.storage.local.set({ "saved": storage["saved"] });
-                        }
-                        break;
-                    }
-                }
-                sendMessage({ "type": "start", "name": save });
-                e.target.classList.add("active");
-                document.querySelector("#pause").classList.remove("active");
-            });
-        });
+    //     chrome.tabs.query({ active: true, currentWindow: true }, function (tabs) {
+    //         const save = document.querySelector("#save-under").value;
+    //         chrome.storage.local.get("saved", storage => {
+    //             for (let i = 0; i < storage["saved"].length; i++) {
+    //                 if (storage["saved"][i].name === save) {
+    //                     if (!storage["saved"][i].pathnames.includes(tabs[0].url)) {
+    //                         storage["saved"][i].pathnames.push(tabs[0].url);
+    //                         chrome.storage.local.set({ "saved": storage["saved"] });
+    //                     }
+    //                     break;
+    //                 }
+    //             }
+    //             sendMessage({ "type": "start", "name": save });
+    //             e.target.classList.add("active");
+    //             document.querySelector("#pause").classList.remove("active");
+    //         });
+    //     });
 
-    });
+    // });    
+     document.querySelector("#start").addEventListener("click", function (e) {
+         chrome.tabs.query({ currentWindow: true, lastFocusedWindow: true }, function (tabs) {
+             if (!tabs || tabs.length === 0) {
+                console.error("No active tab found");
+
+                 return;
+             }
+            
+             const activeTab = tabs[0];
+             if (!activeTab.url) {
+                 console.error("The active tab has no URL");
+                 return;
+             }
+    
+             const save = document.querySelector("#save-under").value;
+             chrome.storage.local.get("saved", storage => {
+                 if (!storage.saved || !Array.isArray(storage.saved)) {
+                     console.error("No saved storage found or it's not an array");
+                     return;
+                 }
+    
+                 for (let i = 0; i < storage.saved.length; i++) {
+                     if (storage.saved[i].name === save) {
+                         if (!storage.saved[i].pathnames.includes(activeTab.url)) {
+                             storage.saved[i].pathnames.push(activeTab.url);
+                             chrome.storage.local.set({ "saved": storage.saved });
+                         }
+                         break;
+                     }
+                 }
+                 sendMessage({ "type": "start", "name": save });
+                 e.target.classList.add("active");
+                 document.querySelector("#pause").classList.remove("active");
+             });
+         });
+     });
+
+    
+    
+
+
+
+
+
 
     // send pause message to content script
     document.querySelector("#pause").addEventListener("click", pause);
