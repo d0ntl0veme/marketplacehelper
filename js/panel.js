@@ -79,7 +79,9 @@ async function detectNewItem(request) {
           // ---- SAFE MERGE LOGIC ----
           if (!batch[x.id]) {
             batch[x.id] = { ...x, updated: true };
+			console.log("Added new item to batch: ", x.id);
           } else {
+			console.log("Merging updates for item: ", x.id);
             const existing = batch[x.id];
             let mergedPhotos = existing.listing_photos;
             if (x.listing_photos && x.listing_photos.length > 0) {
@@ -278,10 +280,12 @@ function filterItems() {
                     if (totalAfterFilter >= storage["settings"]["max_items"]) return;
                     const item = data[key];
                     let allowAfterFilter = true;
+					let reason = ""; // track why we skip
 					if (!item.location || item.location.latitude == null || item.location.longitude == null) {
 					// Decide if you want to skip or fallback
 					// e.g. skip:
 					allowAfterFilter = false; // or "return" from the forEach
+					reason = "Not within valid location"
 					}
                     let xlat = parseFloat(item.location.latitude), xlong = parseFloat(item.location.longitude);
                     let pythx = Math.sqrt(Math.pow(options.lat - xlat, 2) + Math.pow(options.long - xlong, 2));
@@ -600,6 +604,31 @@ const loadSettings = (callback = () => { }) => {
         });
     });
 }
+
+document.querySelector("#clear").addEventListener("click", () => {
+  if (!confirm("Are you sure you want to clear all saved listings (but keep settings)?")) {
+    return;
+  }
+
+  // 1. Get everything in local storage
+  chrome.storage.local.get(null, (items) => {
+    // 2. Determine which keys to remove
+    //    For example, let's keep only "settings"
+    //    and remove everything else:
+    const keepKeys = ["settings"];
+    const allKeys = Object.keys(items);
+
+    // "removeKeys" are all keys except what's in "keepKeys"
+    const removeKeys = allKeys.filter(key => !keepKeys.includes(key));
+
+    // 3. Remove only those keys
+    chrome.storage.local.remove(removeKeys, () => {
+      console.log("Cleared all listings, kept settings.");
+      // Optionally re-run filterItems() or refresh the UI
+      reset();
+    });
+  });
+});
 
 document.addEventListener("DOMContentLoaded", function () {
 
