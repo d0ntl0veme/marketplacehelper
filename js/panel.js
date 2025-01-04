@@ -72,16 +72,26 @@ async function detectNewItem(request) {
             redText = x.redacted_description.text;
           }
 
-          // Now use redText here:
           x.negotiable = x.can_buyer_make_checkout_offer
             ? true
             : isItemNegotiable(x.marketplace_listing_title + " " + redText);
 
+          // ---- SAFE MERGE LOGIC ----
           if (!batch[x.id]) {
             batch[x.id] = { ...x, updated: true };
           } else {
-            batch[x.id] = { ...batch[x.id], ...x };
+            const existing = batch[x.id];
+            let mergedPhotos = existing.listing_photos;
+            if (x.listing_photos && x.listing_photos.length > 0) {
+              mergedPhotos = x.listing_photos;
+            }
+            batch[x.id] = {
+              ...existing,
+              ...x,
+              listing_photos: mergedPhotos
+            };
           }
+
           document.querySelector(".batch-count").textContent =
             Object.keys(batch).length + " waiting";
         }
